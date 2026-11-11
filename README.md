@@ -9,8 +9,8 @@ MERN stack, JavaScript only:
 
 ## Deployed URLs
 
-- Frontend: <https://crew-sable.vercel.app> (Vercel)
-- Backend API: <https://crew-api.onrender.com/api/health> (Render)
+- Frontend: <https://crew-beta-one.vercel.app> (Vercel)
+- Backend API: <https://crew-api-3zom.onrender.com/api/health> (Render)
 
 ## Features (night 1 scope)
 
