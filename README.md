@@ -12,7 +12,7 @@ MERN stack, JavaScript only:
 - Frontend: <https://crew-beta-one.vercel.app> (Vercel)
 - Backend API: <https://crew-api-3zom.onrender.com/api/health> (Render)
 
-## Features (nights 1–2 scope)
+## Features (nights 1–3 scope)
 
 - Register / login with bcrypt-hashed passwords and JWT access tokens
   (`Authorization: Bearer <token>`, role in the token payload) — auth shape reused
@@ -38,8 +38,27 @@ MERN stack, JavaScript only:
   write time in one pipeline update); the last member leaving deletes the team.
 - Every team change (join, accept, decline, remove, leader change, delete, leave)
   writes an `AuditLog` row.
+- **Realtime board (Socket.io, same JWT as REST)**: sockets authenticate with the
+  Bearer token at the handshake (bad token = no connection). Rooms are
+  `hackathon:<id>` (any logged-in user) and `team:<id>` — team-room membership is
+  validated SERVER-side, so a non-member can never listen in. Every membership
+  change emits `teamCreated` / `memberJoined` / `memberRemoved` /
+  `joinRequestReceived` / `joinRequestResolved` / `leaderChanged` / `teamDeleted`;
+  the board and team pages refetch on event (zero polling) and re-subscribe +
+  refetch once on reconnect. Socket payloads carry the SAFE team — the invite
+  code never rides a socket.
+- **Teammate suggestions with explainable scores** (`GET /api/hackathons/:id/suggestions`):
+  ranks team-less users by what your team is MISSING (complementary skills:
+  +2 per missing skill, +0.5 per overlap) plus timezone proximity (Δoffset ≤ 60 min
+  → +2, ≤ 180 → +1), and returns the full breakdown (`missingSkills`,
+  `overlappingSkills`, `skillsScore`, `timezoneDeltaMinutes`, `timezoneScore`,
+  `total`) with every suggestion.
+- **Visible audit trail** (`GET /api/teams/:id/audit`): the same `AuditLog` rows the
+  controllers already write, rendered as an activity feed on the team page —
+  members only (non-members get `403`), newest first.
 - Jest + Supertest suite, including **50 parallel joins for the last seat:
-  exactly one wins, 49 get clean 409s** (`cd server && npm test`).
+  exactly one wins, 49 get clean 409s**, plus socket-event, audit-sequence and
+  suggestion-exclusion gates (`cd server && npm test`).
 
 ## API
 
@@ -57,9 +76,17 @@ MERN stack, JavaScript only:
 | PATCH  | `/api/teams/:teamId/requests/:requestId/decline` | JWT (leader) | Decline |
 | DELETE | `/api/teams/:teamId/members/:memberId` | JWT (leader) | Remove a member |
 | POST   | `/api/teams/:teamId/leave` | JWT | Leave (leader leaving passes leadership / last member deletes team) |
+| GET    | `/api/teams/:teamId` | optional JWT | Team detail (safe team; the leader also gets the live invite code) |
+| GET    | `/api/teams/:teamId/audit` | JWT (member) | Audit trail, newest first (non-members: `403`) |
+| GET    | `/api/hackathons/:id/suggestions` | JWT | Ranked teammate suggestions with score breakdowns (`409` if you have no team in the hackathon) |
 | GET    | `/api/hackathons`     | –    | Lists hackathons (a default one is seeded at boot) |
 
 All inputs are validated; invalid input returns `400` with a clear message.
+
+**Socket.io** (same port as REST, JWT via `handshake.auth.token`):
+connect → emit `hackathon:subscribe` / `team:subscribe` with an ack; server pushes
+`teamCreated`, `memberJoined`, `memberRemoved`, `joinRequestReceived`,
+`joinRequestResolved`, `leaderChanged`, `teamDeleted`.
 
 ## Run locally
 
@@ -76,10 +103,17 @@ npm run dev
 
 Server runs on `http://localhost:3001` (set by `PORT`).
 
-Run the race-proofing test suite (needs MongoDB on `localhost:27017`):
+Run the race-proofing test suite (needs MongoDB on `localhost:27017`; the two
+suites use separate test databases because Jest runs files in parallel):
 
 ```bash
 npm test
+```
+
+Live realtime proof without a second browser (server must be running):
+
+```bash
+node scripts/rt-proof.mjs
 ```
 
 `server/.env`:
@@ -122,19 +156,27 @@ App runs on `http://localhost:5173`.
 server/
   src/
     app.js                 Express app + CORS + routes
-    server.js              Entry: DB connect, seed, listen
+    server.js              Entry: DB connect, seed, listen + initializeSocket
     config/db.js           Mongoose connection from MONGODB_URI
     middleware/auth.js     requireAuth (Bearer JWT) + requireRole
     models/                User, Hackathon, Team, JoinRequest, AuditLog, Idempotency
-    controllers/           auth (pawn-shop JWT shape), teams, joins (race-proof)
+    controllers/           auth (pawn-shop JWT shape), teams, joins (race-proof), hackathons (suggestions)
     routes/                auth, teams, hackathons
+    realtime/
+      io.js                Socket.io server: handshake JWT auth + room subscription (server-authorized)
+      events.js            emitToHackathon / emitToTeam (fire-and-forget projections)
     utils/
       validate.js          Input validation → clear 400 errors
       idempotency.js       One execution per key (unique-index arbiter)
+      teamView.js          Shared TEAM_POPULATE + invite-code stripper (HTTP and sockets agree)
+      timezone.js          IANA timezone → UTC offset in minutes (no date libraries)
+  scripts/rt-proof.mjs     "Second browser window" proof (socket watcher vs HTTP actions)
   tests/join.test.js       Jest + Supertest (50-parallel race is the gate)
+  tests/realtime.test.js   Socket events, audit sequence, suggestions, room access control
 client/
   src/
     api.js                Axios instance + Bearer/401 interceptors
-    context/AuthContext   Session in localStorage
-    pages/                Login, Register, TeamList, CreateTeam
+    realtime/socket.js    One socket per tab, same JWT, lifecycle owned by AuthContext
+    context/AuthContext   Session in localStorage + socket connect/disconnect
+    pages/                Login, Register, TeamList (live board), CreateTeam, TeamPage (team room), JoinByCode
 ```

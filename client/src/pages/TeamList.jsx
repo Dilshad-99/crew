@@ -1,8 +1,12 @@
-// Teams are fetched in a useEffect keyed on [hackathonId, location.key], so navigating here after creating a team re-runs the fetch and the new team appears without any page refresh.
-import { useEffect, useState } from "react";
+// THE LIVE BOARD. Teams load via REST, then the page joins the hackathon's socket room and refetches ON every team event (and once on every reconnect) — the second browser window sees a join the instant it happens, zero polling, zero refresh. If the socket isn't up yet, a window event from the socket manager re-runs the wiring once it is.
+import { useCallback, useEffect, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import api from "../api.js";
 import { useAuth } from "../context/AuthContext.jsx";
+import { getSocket } from "../realtime/socket.js";
+
+// Every event the board cares about → one refetch (server sends SAFE payloads; the invite code never rides a socket)
+const BOARD_EVENTS = ["teamCreated", "memberJoined", "memberRemoved", "leaderChanged", "teamDeleted"];
 
 export default function TeamList() {
   const { user, logout } = useAuth();
@@ -12,6 +16,8 @@ export default function TeamList() {
   const [teams, setTeams] = useState([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [live, setLive] = useState(false);
+  const [socketReady, setSocketReady] = useState(false);
 
   useEffect(() => {
     api
@@ -22,6 +28,14 @@ export default function TeamList() {
       })
       .catch((err) => setError(err.response?.data?.message || "Could not load hackathons"));
   }, []);
+
+  const loadTeams = useCallback(() => {
+    if (!hackathonId) return;
+    api
+      .get("/api/teams", { params: { hackathonId } })
+      .then((res) => setTeams(res.data.teams || []))
+      .catch((err) => setError(err.response?.data?.message || "Could not load teams"));
+  }, [hackathonId]);
 
   useEffect(() => {
     if (!hackathonId) return;
@@ -34,6 +48,40 @@ export default function TeamList() {
       .finally(() => setLoading(false));
   }, [hackathonId, location.key]);
 
+  // "the socket exists now" — children mount before the AuthProvider effect that connects it, so pages listen for this signal
+  useEffect(() => {
+    const onReady = () => setSocketReady(true);
+    if (getSocket()?.connected) setSocketReady(true);
+    window.addEventListener("crew:socket-connected", onReady);
+    return () => window.removeEventListener("crew:socket-connected", onReady);
+  }, []);
+
+  // Realtime wiring: subscribe to the board room, refetch on every change event, and re-subscribe on reconnect (rooms don't survive a dropped socket)
+  useEffect(() => {
+    const socket = getSocket();
+    if (!socketReady || !socket || !hackathonId) return;
+
+    const resubscribe = () => {
+      socket.emit("hackathon:subscribe", hackathonId, (ack) => {
+        if (ack?.status) {
+          setLive(true);
+          loadTeams(); // fresh state after (re)subscribe — the "refetch once on reconnect" contract
+        } else {
+          setLive(false);
+        }
+      });
+    };
+
+    if (socket.connected) resubscribe();
+    socket.on("connect", resubscribe);
+    BOARD_EVENTS.forEach((event) => socket.on(event, loadTeams));
+
+    return () => {
+      socket.off("connect", resubscribe);
+      BOARD_EVENTS.forEach((event) => socket.off(event, loadTeams));
+    };
+  }, [socketReady, hackathonId, loadTeams]);
+
   const selectedHackathon = hackathons.find((h) => h._id === hackathonId);
   const myTeam = teams.find((t) =>
     (t.members || []).some((m) => String(m._id) === String(user?._id))
@@ -44,7 +92,8 @@ export default function TeamList() {
       <header>
         <h1>Crew</h1>
         <div>
-          <span>{user?.name}</span>
+          <span>{user?.name} </span>
+          <span className={live ? "notice" : "error"}>{live ? "● live" : "● offline"}</span>
           <button onClick={logout}>Log out</button>
         </div>
       </header>
@@ -67,12 +116,12 @@ export default function TeamList() {
 
       {myTeam && (
         <p className="notice">
-          You are on <strong>{myTeam.name}</strong> in this hackathon.
+          You are on <Link to={`/teams/${myTeam._id}`}>{myTeam.name}</Link> in this hackathon.
         </p>
       )}
       {!myTeam && hackathonId && (
         <p>
-          <Link to="/teams/new">Create a team</Link>
+          <Link to="/teams/new">Create a team</Link> · <Link to="/join">Join by invite code</Link>
         </p>
       )}
 
@@ -84,7 +133,9 @@ export default function TeamList() {
       <ul className="team-list">
         {teams.map((team) => (
           <li key={team._id} className="team-card">
-            <strong>{team.name}</strong>
+            <strong>
+              <Link to={`/teams/${team._id}`}>{team.name}</Link>
+            </strong>
             <span>
               Leader: {team.leaderId?.name || "unknown"} · {team.memberCount} member
               {team.memberCount === 1 ? "" : "s"}

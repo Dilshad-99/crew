@@ -1,21 +1,11 @@
-// Race-proof joins: every membership change is ONE atomic MongoDB operation — the FILTER checks capacity/expiry/membership and the UPDATE mutates in the same operation, so there is no read-then-write window for concurrent requests to squeeze through. Read-check-write here would be the bug; the guards below never are. Retries are made safe by idempotency keys, and every change writes an AuditLog row.
+// Race-proof joins: every membership change is ONE atomic MongoDB operation — the FILTER checks capacity/expiry/membership and the UPDATE mutates in the same operation, so there is no read-then-write window for concurrent requests to squeeze through. Read-check-write here would be the bug; the guards below never are. Retries are made safe by idempotency keys, and every change writes an AuditLog row. Realtime emits fire AFTER these writes commit — sockets announce the truth, they never create it.
 import Team from "../models/Team.js";
 import JoinRequest from "../models/JoinRequest.js";
 import AuditLog from "../models/AuditLog.js";
 import { validateJoinInput, validateJoinRequestInput, isValidObjectId } from "../utils/validate.js";
 import { withIdempotency, HttpError } from "../utils/idempotency.js";
-
-const TEAM_POPULATE = [
-  { path: "leaderId", select: "name" },
-  { path: "members", select: "name" },
-  { path: "hackathonId", select: "name minTeamSize maxTeamSize" }
-];
-
-// Invite codes are secrets: responses from join/accept/leave strip them — only the create-team response hands the code to the leader to share
-function toSafeTeam(team) {
-  const { inviteCode, inviteCodeExpiresAt, __v, ...safe } = team.toObject();
-  return safe;
-}
+import { TEAM_POPULATE, toSafeTeam } from "../utils/teamView.js";
+import { emitToHackathon, emitToTeam } from "../realtime/events.js";
 
 function isDuplicateKeyError(error) {
   return error.code === 11000 || error.message?.includes("E11000") || error.message?.includes("duplicate key");
@@ -62,7 +52,15 @@ export const joinByInviteCode = async (req, res) => {
 
       await AuditLog.create({ teamId: updated._id, actorId: userId, action: "member_joined", details: { via: "invite_code" } });
 
-      return { statusCode: 200, body: { status: true, team: toSafeTeam(await updated.populate(TEAM_POPULATE)) } };
+      // Room ids are captured as strings BEFORE populate() — populating swaps hackathonId for a document, and "hackathon:[object Object]" would never match the room a client subscribed to
+      const teamId = String(updated._id);
+      const hackathonId = String(updated.hackathonId);
+      const safeTeam = toSafeTeam(await updated.populate(TEAM_POPULATE));
+      // Broadcast only after the atomic write committed — the board and the team page both hear memberJoined
+      emitToHackathon(hackathonId, "memberJoined", { teamId, hackathonId, userId, team: safeTeam });
+      emitToTeam(teamId, "memberJoined", { teamId, hackathonId, userId, team: safeTeam });
+
+      return { statusCode: 200, body: { status: true, team: safeTeam } };
     });
 
     return res.status(result.statusCode).json(result.body);
@@ -117,7 +115,11 @@ export const createJoinRequest = async (req, res) => {
 
     await AuditLog.create({ teamId: team._id, actorId: userId, action: "join_request_created" });
 
-    return res.status(201).json({ status: true, request });
+    // Populate the requester so the leader's live feed shows WHO asked, then announce it inside the team room only
+    const populatedRequest = await request.populate("userId", "name email skills timezone");
+    emitToTeam(team._id, "joinRequestReceived", { teamId: team._id, request: populatedRequest });
+
+    return res.status(201).json({ status: true, request: populatedRequest });
   } catch (error) {
     if (isDuplicateKeyError(error)) {
       // keyPattern says WHICH unique index fired: a retried idempotencyKey replays the original request; a second pending request for the same team is a clean 409
@@ -226,7 +228,13 @@ export const acceptJoinRequest = async (req, res) => {
 
     await AuditLog.create({ teamId, actorId: leaderId, action: "request_accepted", details: { newMemberId: request.userId } });
 
-    res.status(200).json({ status: true, team: toSafeTeam(await updated.populate(TEAM_POPULATE)), request });
+    const safeTeam = toSafeTeam(await updated.populate(TEAM_POPULATE));
+    // An accepted request is both a resolved request and a member joined — board and team page both need to know
+    emitToHackathon(team.hackathonId, "memberJoined", { teamId, hackathonId: team.hackathonId, userId: request.userId, team: safeTeam, via: "request_accepted" });
+    emitToTeam(teamId, "memberJoined", { teamId, hackathonId: team.hackathonId, userId: request.userId, team: safeTeam, via: "request_accepted" });
+    emitToTeam(teamId, "joinRequestResolved", { teamId, requestId, status: "accepted", userId: request.userId });
+
+    res.status(200).json({ status: true, team: safeTeam, request });
   } catch (error) {
     console.error("Accept join request error:", error.message);
     res.status(500).json({ status: false, message: "Server error" });
@@ -264,6 +272,8 @@ export const declineJoinRequest = async (req, res) => {
     }
 
     await AuditLog.create({ teamId, actorId: leaderId, action: "request_declined", details: { declinedUserId: request.userId } });
+
+    emitToTeam(teamId, "joinRequestResolved", { teamId, requestId, status: "declined", userId: request.userId });
 
     res.status(200).json({ status: true, request });
   } catch (error) {
@@ -303,7 +313,13 @@ export const removeMember = async (req, res) => {
 
     await AuditLog.create({ teamId, actorId: leaderId, action: "member_removed", details: { removedUserId: memberId } });
 
-    res.status(200).json({ status: true, team: toSafeTeam(await updated.populate(TEAM_POPULATE)) });
+    // String ids BEFORE populate (populate would turn hackathonId into a document and break the room name)
+    const removedFromHackathonId = String(updated.hackathonId);
+    const safeTeam = toSafeTeam(await updated.populate(TEAM_POPULATE));
+    emitToHackathon(removedFromHackathonId, "memberRemoved", { teamId, hackathonId: removedFromHackathonId, userId: memberId, via: "removed", team: safeTeam });
+    emitToTeam(teamId, "memberRemoved", { teamId, hackathonId: removedFromHackathonId, userId: memberId, via: "removed", team: safeTeam });
+
+    res.status(200).json({ status: true, team: safeTeam });
   } catch (error) {
     console.error("Remove member error:", error.message);
     res.status(500).json({ status: false, message: "Server error" });
@@ -339,6 +355,8 @@ export const leaveTeam = async (req, res) => {
         return res.status(409).json({ status: false, message: "Team changed while leaving — please retry" });
       }
       await AuditLog.create({ teamId, actorId: userId, action: "member_left" });
+      emitToHackathon(team.hackathonId, "memberRemoved", { teamId, hackathonId: team.hackathonId, userId, via: "leave" });
+      emitToTeam(teamId, "memberRemoved", { teamId, hackathonId: team.hackathonId, userId, via: "leave" });
       return res.status(200).json({ status: true, message: "You left the team" });
     }
 
@@ -355,6 +373,8 @@ export const leaveTeam = async (req, res) => {
         if (del.deletedCount === 1) {
           await JoinRequest.deleteMany({ teamId });
           await AuditLog.create({ teamId, actorId: userId, action: "team_deleted" });
+          emitToHackathon(current.hackathonId, "teamDeleted", { teamId, hackathonId: current.hackathonId });
+          emitToTeam(teamId, "teamDeleted", { teamId, hackathonId: current.hackathonId });
           return res.status(200).json({ status: true, message: "You were the last member — the team has been deleted" });
         }
         continue; // someone joined between our read and the delete — retry as a leader with members
@@ -376,6 +396,8 @@ export const leaveTeam = async (req, res) => {
       );
       if (updated) {
         await AuditLog.create({ teamId, actorId: userId, action: "leadership_transferred", details: { newLeaderId: updated.leaderId } });
+        emitToHackathon(updated.hackathonId, "leaderChanged", { teamId, hackathonId: updated.hackathonId, newLeaderId: updated.leaderId, previousLeaderId: userId });
+        emitToTeam(teamId, "leaderChanged", { teamId, hackathonId: updated.hackathonId, newLeaderId: updated.leaderId, previousLeaderId: userId });
         return res.status(200).json({
           status: true,
           message: "You left the team — leadership passed to the oldest remaining member",

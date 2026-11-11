@@ -30,8 +30,9 @@ export default function CreateTeam() {
     setLoading(true);
 
     try {
-      await api.post("/api/teams", { hackathonId, name, idempotencyKey });
-      navigate("/teams");
+      const res = await api.post("/api/teams", { hackathonId, name, idempotencyKey });
+      // straight to the team room — the leader lands on their invite code + live requests immediately
+      navigate(`/teams/${res.data.team._id}`);
     } catch (err) {
       setErrors(err.response?.data?.errors || {});
       setError(err.response?.data?.message || "Could not create team");

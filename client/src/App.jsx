@@ -5,6 +5,8 @@ import Login from "./pages/Login.jsx";
 import Register from "./pages/Register.jsx";
 import TeamList from "./pages/TeamList.jsx";
 import CreateTeam from "./pages/CreateTeam.jsx";
+import TeamPage from "./pages/TeamPage.jsx";
+import JoinByCode from "./pages/JoinByCode.jsx";
 
 export default function App() {
   return (
@@ -25,6 +27,22 @@ export default function App() {
           element={
             <ProtectedRoute>
               <CreateTeam />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/teams/:teamId"
+          element={
+            <ProtectedRoute>
+              <TeamPage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/join"
+          element={
+            <ProtectedRoute>
+              <JoinByCode />
             </ProtectedRoute>
           }
         />
