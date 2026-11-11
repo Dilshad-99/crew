@@ -1,0 +1,15 @@
+# Calls Render's deploy API on every push to main, because Render's GitHub app doesn't send push events for API-created services
+name: Deploy backend to Render
+on:
+  push:
+    branches: [main]
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Render deploy
+        run: |
+          curl -fsS -X POST "https://api.render.com/v1/services/srv-dbq2r68u01pc739mlv0g/deploys" \
+            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{}'
