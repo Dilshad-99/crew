@@ -1,12 +1,13 @@
 import "./loadEnv.js";
 import app from "./app.js";
 import connection from "./config/db.js";
-import { seedDefaultHackathon } from "./seed.js";
+import { seedDefaultHackathon, backfillTeamCapacity } from "./seed.js";
 
 const port = process.env.PORT || 3001;
 
-connection.once("open", () => {
-  seedDefaultHackathon();
+connection.once("open", async () => {
+  await seedDefaultHackathon();
+  await backfillTeamCapacity();
 });
 
 app.listen(port, () => {

@@ -60,9 +60,40 @@ export function validateTeamInput(body = {}) {
 
   const name = typeof body.name === "string" ? body.name.trim() : "";
   const hackathonId = typeof body.hackathonId === "string" ? body.hackathonId.trim() : "";
+  const idempotencyKey = normalizeIdempotencyKey(body.idempotencyKey);
 
   if (name.length < 3 || name.length > 50) errors.name = "Team name must be 3-50 characters";
   if (!isValidObjectId(hackathonId)) errors.hackathonId = "hackathonId must be a valid id";
+  if (!idempotencyKey) errors.idempotencyKey = "idempotencyKey is required (generate a UUID per submit attempt)";
 
-  return { errors, value: { name, hackathonId } };
+  return { errors, value: { name, hackathonId, idempotencyKey } };
+}
+
+// A key just needs to be a unique opaque token (we recommend crypto.randomUUID()); we only sanity-check shape so junk never reaches the unique index
+function normalizeIdempotencyKey(input) {
+  const key = typeof input === "string" ? input.trim() : "";
+  return /^[A-Za-z0-9-_]{8,100}$/.test(key) ? key : null;
+}
+
+export function validateJoinInput(body = {}) {
+  const errors = {};
+
+  const inviteCode = typeof body.inviteCode === "string" ? body.inviteCode.trim() : "";
+  const idempotencyKey = normalizeIdempotencyKey(body.idempotencyKey);
+
+  if (inviteCode.length < 4 || inviteCode.length > 100) errors.inviteCode = "A valid invite code is required";
+  if (!idempotencyKey) errors.idempotencyKey = "idempotencyKey is required (generate a UUID per submit attempt)";
+
+  return { errors, value: { inviteCode, idempotencyKey } };
+}
+
+export function validateJoinRequestInput(body = {}) {
+  const errors = {};
+  const idempotencyKey = body.idempotencyKey == null ? null : normalizeIdempotencyKey(body.idempotencyKey);
+
+  if (body.idempotencyKey != null && !idempotencyKey) {
+    errors.idempotencyKey = "idempotencyKey must be 8-100 letters, digits, dashes or underscores";
+  }
+
+  return { errors, value: { idempotencyKey } };
 }

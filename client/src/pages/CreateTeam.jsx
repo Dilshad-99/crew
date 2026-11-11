@@ -1,4 +1,4 @@
-// After a successful POST we navigate back to /teams, whose useEffect re-fetches — so the new team shows up in the list with no manual refresh.
+// After a successful POST we navigate back to /teams, whose useEffect re-fetches — so the new team shows up in the list with no manual refresh. The idempotencyKey is generated ONCE per form attempt (useState initializer), so a double-clicked submit sends the SAME key and the server replays the original result instead of creating two teams.
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import api from "../api.js";
@@ -10,6 +10,7 @@ export default function CreateTeam() {
   const [errors, setErrors] = useState({});
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [idempotencyKey] = useState(() => crypto.randomUUID());
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -29,7 +30,7 @@ export default function CreateTeam() {
     setLoading(true);
 
     try {
-      await api.post("/api/teams", { hackathonId, name });
+      await api.post("/api/teams", { hackathonId, name, idempotencyKey });
       navigate("/teams");
     } catch (err) {
       setErrors(err.response?.data?.errors || {});

@@ -14,6 +14,9 @@ const AuditLogSchema = new mongoose.Schema({
   action: {
     type: String,
     required: [true, "action is required"]
+  },
+  details: {
+    type: mongoose.Schema.Types.Mixed
   }
 }, { timestamps: { createdAt: true, updatedAt: false } });
 
